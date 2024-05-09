@@ -4,7 +4,7 @@
 #include <video.h>
 #include <winerror.h>
 
-#pragma comment(linker,"/export:VideoPortSetTrappedEmulatorPorts=_VideoPortSetTrappedEmulatorPorts1@12,@88")
+#pragma comment(linker,"/export:VideoPortSetTrappedEmulatorPorts=_VideoPortSetTrappedEmulatorPorts1@12,@94")
 
 enum { MAX_RANGES = 32 };
 
@@ -52,9 +52,9 @@ VP_STATUS __stdcall VideoPortSetTrappedEmulatorPorts1(
 			HwDeviceExtension, NumAccessRanges, AccessRanges);
 }
 
-#pragma comment(linker,"/export:VideoPortGetAccessRanges=_VideoPortGetAccessRanges1@32,@32")
-#pragma comment(linker,"/export:VideoPortMapMemory=_VideoPortMapMemory1@24,@56")
-#pragma comment(linker,"/export:VideoPortUnmapMemory=_VideoPortUnmapMemory1@12,@98")
+#pragma comment(linker,"/export:VideoPortGetAccessRanges=_VideoPortGetAccessRanges1@32,@36")
+#pragma comment(linker,"/export:VideoPortMapMemory=_VideoPortMapMemory1@24,@61")
+#pragma comment(linker,"/export:VideoPortUnmapMemory=_VideoPortUnmapMemory1@12,@104")
 
 VP_STATUS VideoPortGetAccessRanges1(
   PVOID  HwDeviceExtension,
