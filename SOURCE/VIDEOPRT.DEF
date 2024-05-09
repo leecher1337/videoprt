@@ -1,0 +1,5 @@
+LIBRARY videoprt.sys
+
+EXPORTS
+	VideoPortGetAccessRanges
+	VideoPortSetTrappedEmulatorPorts

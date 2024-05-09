@@ -1,0 +1,8 @@
+LIBRARY vidprt0.sys
+
+EXPORTS
+	DriverEntry
+	VideoPortGetAccessRanges
+	VideoPortSetTrappedEmulatorPorts
+	VideoPortMapMemory
+	VideoPortUnmapMemory
