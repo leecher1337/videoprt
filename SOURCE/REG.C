@@ -1,6 +1,8 @@
 #define _X86_
 #include <ntddk.h>
 #include <ntdef.h>
+#include <initguid.h>
+#include <ntddvdeo.h>
 
 #pragma pack(1)
 
@@ -18,6 +20,7 @@ enum { MAX_RANGES = 32 };
 ULONG numRanges;
 VIDEO_ACCESS_RANGE ranges[MAX_RANGES];
 
+enum { MAXINFO = 2000 };
 
 WCHAR wsPci[] = L"\\REGISTRY\\Machine\\System\\CurrentControlSet\\Enum\\PCI";
 WCHAR wsCtl[] = L"Control";
@@ -33,8 +36,90 @@ struct _OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, 0, 0, 0, 0 };
 
 void* pInfo;
 
-enum { MAXINFO = 2000 };
 
+static BOOLEAN AddRange(CM_PARTIAL_RESOURCE_LIST* cmprl)
+{
+	ULONG k;
+	CM_PARTIAL_RESOURCE_DESCRIPTOR* rd;
+	VIDEO_ACCESS_RANGE* ar = ranges + numRanges;
+	BOOLEAN status = FALSE;
+
+	for (k = 0; k < cmprl->Count && numRanges < MAX_RANGES; k++)
+	{
+		rd = cmprl->PartialDescriptors + k;
+		if (rd->Type == CmResourceTypePort)			ar->RangeInIoSpace = 1;
+		//else if (rd->Type == CmResourceTypeMemory)	ar->RangeInIoSpace = 0;
+		else continue;
+
+		ar->RangeStart = rd->u.Port.Start;
+		ar->RangeLength = rd->u.Port.Length;
+		ar->RangeVisible = 1;
+		ar->RangeShareable = 1;
+		ar->RangePassive = 0;
+		DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt found an IO-Range %x-%x", rd->u.Port.Start.u.LowPart, rd->u.Port.Start.u.LowPart + rd->u.Port.Length);
+
+		ar++;
+		numRanges++;
+		status = TRUE;
+	}
+	return status;
+}
+
+BOOLEAN LoadBootConfig()
+{
+	PWSTR pszszDeviceList = NULL, p;
+	GUID Interface = GUID_DISPLAY_ADAPTER_INTERFACE;
+	NTSTATUS Status;
+	PVOID pInfo;
+	BOOLEAN status = FALSE;
+
+	if (NT_SUCCESS(Status = IoGetDeviceInterfaces(&Interface, NULL, 0, &pszszDeviceList))) 
+	{
+		pInfo = ExAllocatePool(PagedPool, MAXINFO);
+		if (!pInfo)
+		{
+			DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "videoprt failed to allocate memory for info.");
+			ExFreePool(pszszDeviceList);
+			return FALSE;
+		}
+
+		for (p = pszszDeviceList; *p; p += wcslen(p))
+		{
+			UNICODE_STRING SymbolicLink = { 0 };
+			PFILE_OBJECT FileObject;
+			PDEVICE_OBJECT DeviceObject = NULL;
+
+			RtlInitUnicodeString(&SymbolicLink, p);
+			if (NT_SUCCESS(Status = IoGetDeviceObjectPointer(&SymbolicLink, FILE_READ_DATA, &FileObject, &DeviceObject)))
+			{
+				ULONG Size = MAXINFO;
+
+				Status = IoGetDeviceProperty(FileObject->DeviceObject,
+					DevicePropertyBootConfiguration, Size, pInfo, &Size
+					);
+				if (NT_SUCCESS(Status))
+				{
+					status = AddRange(&((CM_RESOURCE_LIST*)pInfo)->List[0].PartialResourceList);
+				}
+				else
+				{
+					DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "IoGetDeviceProperty for %S failed: %08X", p, Status);
+				}
+			}
+			else 
+			{
+				DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "IoGetDeviceObjectPointer %S failed: %08X", p, Status);
+			}
+		}
+		ExFreePool(pInfo);
+		ExFreePool(pszszDeviceList);
+	}
+	else
+	{
+		DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "IoGetDeviceInterfaces failed: %08X", Status);
+	}
+	return status;
+}
 
 NTSTATUS OpenKey(HANDLE* pkey, HANDLE root, PWSTR name)
 {
@@ -63,31 +148,32 @@ HANDLE KeyEnum(HANDLE root, ULONG ord)
 
 
 #define KEY_GET_VALUE(hkey, name)\
-	ZwQueryValueKey(hkey, &name, KeyValuePartialInformation, vinfo, MAXINFO, &size)
+	(Status = ZwQueryValueKey(hkey, &name, KeyValuePartialInformation, vinfo, MAXINFO, &size))
 
 
 BOOLEAN RegLoad()
 {
-	ULONG i, j, k, size;
+	ULONG i, j, size;
 	HANDLE hkPci, hkDev, hkRev, hkCtl;
 	UNICODE_STRING usClass;
 	KEY_VALUE_PARTIAL_INFORMATION* vinfo;
 	CM_PARTIAL_RESOURCE_LIST* cmprl;
-	CM_PARTIAL_RESOURCE_DESCRIPTOR* rd;
-
-	VIDEO_ACCESS_RANGE* ar = ranges + numRanges;
+	NTSTATUS Status;
 	BOOLEAN status = FALSE;
 
 	pInfo = ExAllocatePool(PagedPool, MAXINFO);
-	if (!pInfo) return FALSE;
+	if (!pInfo)
+	{
+		DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "videoprt failed to allocate memory for info.");
+		return FALSE;
+	}
 
 	vinfo = (KEY_VALUE_PARTIAL_INFORMATION*) pInfo;
 	cmprl = & ((CM_RESOURCE_LIST*)vinfo->Data)->List[0].PartialResourceList;
 
-	i = j = k = size = 0;
-	rd = 0;
+	i = j = size = 0;
 
-	if (OpenKey(&hkPci, 0, wsPci) == STATUS_SUCCESS)
+	if ((Status = OpenKey(&hkPci, 0, wsPci)) == STATUS_SUCCESS)
 	{
 		for (i=0;  hkDev = KeyEnum(hkPci, i);  i++)
 		{
@@ -98,29 +184,27 @@ BOOLEAN RegLoad()
 					RtlInitUnicodeString(&usClass, (PWSTR)vinfo->Data);
 					if (RtlCompareUnicodeString(&usClass, &usDisplay, TRUE)) continue;
 					
-					if (OpenKey(&hkCtl, hkRev, wsCtl)) continue;
+					DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt found display class key (%d/%d)", i, j);
+					if (Status = OpenKey(&hkCtl, hkRev, wsCtl))
+					{
+						DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt NO Control-Subkey (%08X).", Status);
+						continue;
+					}
 
 					if (!KEY_GET_VALUE(hkCtl, usCfg))
 					{
-						for (k=0; k < cmprl->Count && numRanges < MAX_RANGES; k++)
-						{
-							rd = cmprl->PartialDescriptors + k;
-							if (rd->Type == CmResourceTypePort)			ar->RangeInIoSpace = 1;
-							//else if (rd->Type == CmResourceTypeMemory)	ar->RangeInIoSpace = 0;
-							else continue;
-							
-							ar->RangeStart = rd->u.Port.Start;
-							ar->RangeLength = rd->u.Port.Length;
-							ar->RangeVisible = 1;
-							ar->RangeShareable = 1;
-							ar->RangePassive = 0;
-							
-							ar++;
-							numRanges++;
-							status = TRUE;
-						}
+						DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt found AllocConfig!");
+						status = AddRange(cmprl);
+					}
+					else
+					{
+						DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt NO AllocConfig (%08X)", Status);
 					}
 					ZwClose(hkCtl);
+				}
+				else
+				{
+					DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL, "videoprt Cannot find Class value (%08X) (%d/%d)", Status, i, j);
 				}
 				ZwClose(hkRev);
 			}
@@ -128,6 +212,13 @@ BOOLEAN RegLoad()
 		}
 		ZwClose(hkPci);
 	}
+	else
+	{
+		DbgPrintEx(DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL, "videoprt failed to open root key: %08X", Status);
+	}
 	ExFreePool(pInfo);
+	if (!status) return LoadBootConfig();
 	return status;
 }
+
+
